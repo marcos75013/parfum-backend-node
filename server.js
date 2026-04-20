@@ -5,34 +5,67 @@ import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
-import dns from 'node:dns';
+import { Resend } from 'resend';
+import rateLimit from 'express-rate-limit';
 
 dotenv.config();
 
-// ✅ Important : préfère IPv4 pour éviter les soucis IPv6 / EHOSTUNREACH
-dns.setDefaultResultOrder('ipv4first');
-
 const app = express();
-app.use(cors());
-app.use(express.json());
 
 // =========================
 // ⚙️ CONFIG
 // =========================
 
 const PORT = Number(process.env.PORT || 3000);
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const MAIL_TO = process.env.MAIL_TO;
+const MAIL_TO_BACKUP = process.env.MAIL_TO_BACKUP;
+const MAIL_FROM = process.env.MAIL_FROM || 'commandes@negociobom.eu';
 
 // 🔧 Recréer __dirname en ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// 📁 Fichier cache
+// 📁 Fichiers locaux
 const cacheFilePath = path.join(__dirname, 'cache.json');
+const ordersBackupFilePath = path.join(__dirname, 'orders_backup.json');
 
 // 🧠 Cache mémoire
 let cache = new Map();
+
+const resend = new Resend(RESEND_API_KEY);
+
+// =========================
+// 🌐 CORS
+// =========================
+
+app.use(
+    cors({
+        origin: [
+            'http://localhost:4200',
+            'http://localhost:3000',
+            'https://negociobom.eu',
+            'https://www.negociobom.eu',
+        ],
+    }),
+);
+
+app.use(express.json());
+
+// =========================
+// 🛡️ RATE LIMIT
+// =========================
+
+const orderLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 5, // 5 commandes max par IP sur 15 minutes
+    message: {
+        error: 'Trop de tentatives. Réessaie plus tard.',
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
 
 // =========================
 // 📦 CACHE
@@ -62,6 +95,15 @@ function saveCacheToFile() {
         fs.writeFileSync(cacheFilePath, JSON.stringify(objectToSave, null, 2));
     } catch (error) {
         console.error('❌ Erreur sauvegarde cache :', error);
+    }
+}
+
+function backupOrderToFile(order) {
+    try {
+        fs.appendFileSync(ordersBackupFilePath, JSON.stringify(order) + '\n', 'utf-8');
+        console.log('💾 Commande sauvegardée dans orders_backup.json');
+    } catch (error) {
+        console.error('❌ Impossible de sauvegarder la commande en backup :', error);
     }
 }
 
@@ -198,6 +240,17 @@ function formatPrice(value) {
     return `${number.toFixed(2)} €`;
 }
 
+function isValidEmail(email) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
+}
+
+function maskEmail(email) {
+    if (!email || !email.includes('@')) return 'non défini';
+    const [name, domain] = email.split('@');
+    if (name.length <= 2) return `**@${domain}`;
+    return `${name.slice(0, 2)}***@${domain}`;
+}
+
 function buildOrderHtml(customer, items, total) {
     const rows = items
         .map((item) => {
@@ -299,6 +352,10 @@ function validateOrderPayload(body) {
     const items = body?.items;
     const total = body?.total;
 
+    if (body?.website) {
+        return 'Requête invalide.';
+    }
+
     if (!customer || typeof customer !== 'object') {
         return 'Informations client manquantes.';
     }
@@ -310,11 +367,15 @@ function validateOrderPayload(body) {
         }
     }
 
+    if (!isValidEmail(customer.email)) {
+        return 'Adresse email invalide.';
+    }
+
     if (!Array.isArray(items) || items.length === 0) {
         return 'Le panier est vide.';
     }
 
-    if (typeof total !== 'number') {
+    if (typeof total !== 'number' || Number.isNaN(total)) {
         return 'Total invalide.';
     }
 
@@ -322,96 +383,58 @@ function validateOrderPayload(body) {
 }
 
 // =========================
-// 📧 EMAIL / SMTP
+// 📧 EMAIL / RESEND
 // =========================
 
-const MAIL_HOST = process.env.MAIL_HOST || 'smtp.gmail.com';
-const MAIL_PORT = Number(process.env.MAIL_PORT || 465);
-const MAIL_SECURE =
-    process.env.MAIL_SECURE !== undefined
-        ? String(process.env.MAIL_SECURE).toLowerCase() === 'true'
-        : MAIL_PORT === 465;
-
-const MAIL_USER = process.env.MAIL_USER;
-const MAIL_PASS = process.env.MAIL_PASS;
-const MAIL_TO = process.env.MAIL_TO || process.env.MAIL_USER;
-
-function maskEmail(email) {
-    if (!email || !email.includes('@')) return 'non défini';
-    const [name, domain] = email.split('@');
-    if (name.length <= 2) return `**@${domain}`;
-    return `${name.slice(0, 2)}***@${domain}`;
-}
-
-const transporter = nodemailer.createTransport({
-    host: MAIL_HOST,
-    port: MAIL_PORT,
-    secure: MAIL_SECURE,
-    auth: {
-        user: MAIL_USER,
-        pass: MAIL_PASS,
-    },
-    connectionTimeout: 15000,
-    greetingTimeout: 15000,
-    socketTimeout: 20000,
-    logger: true,
-    debug: true,
-});
-
-async function verifySmtp() {
-    if (!MAIL_HOST || !MAIL_USER || !MAIL_PASS || !MAIL_TO) {
-        console.error('❌ Configuration email incomplète dans le fichier .env');
-        console.error('MAIL_HOST =', MAIL_HOST || 'non défini');
-        console.error('MAIL_PORT =', MAIL_PORT || 'non défini');
-        console.error('MAIL_SECURE =', MAIL_SECURE);
-        console.error('MAIL_USER =', maskEmail(MAIL_USER));
-        console.error('MAIL_PASS =', MAIL_PASS ? 'défini' : 'non défini');
+async function verifyResend() {
+    if (!RESEND_API_KEY || !MAIL_TO || !MAIL_FROM) {
+        console.error('❌ Configuration Resend incomplète dans le fichier .env');
+        console.error('RESEND_API_KEY =', RESEND_API_KEY ? 'définie' : 'non définie');
+        console.error('MAIL_FROM =', MAIL_FROM || 'non défini');
         console.error('MAIL_TO =', maskEmail(MAIL_TO));
+        console.error('MAIL_TO_BACKUP =', maskEmail(MAIL_TO_BACKUP));
         return;
     }
 
-    console.log('📧 Vérification SMTP...');
-    console.log('MAIL_HOST =', MAIL_HOST);
-    console.log('MAIL_PORT =', MAIL_PORT);
-    console.log('MAIL_SECURE =', MAIL_SECURE);
-    console.log('MAIL_USER =', maskEmail(MAIL_USER));
+    console.log('✅ Resend prêt');
+    console.log('MAIL_FROM =', MAIL_FROM);
     console.log('MAIL_TO =', maskEmail(MAIL_TO));
 
-    try {
-        await transporter.verify();
-        console.log('✅ SMTP prêt : connexion email OK');
-    } catch (error) {
-        console.error('❌ SMTP erreur de configuration :', error);
+    if (MAIL_TO_BACKUP) {
+        console.log('MAIL_TO_BACKUP =', maskEmail(MAIL_TO_BACKUP));
     }
 }
 
 async function sendOrderEmail({ customer, items, total }) {
-    if (!MAIL_HOST || !MAIL_USER || !MAIL_PASS || !MAIL_TO) {
-        throw new Error('Configuration email incomplète dans le fichier .env');
+    if (!RESEND_API_KEY || !MAIL_TO || !MAIL_FROM) {
+        throw new Error('Configuration Resend incomplète dans le fichier .env');
     }
 
     const subject = `Nouvelle commande - ${customer.firstName} ${customer.lastName}`;
+    const recipients = MAIL_TO_BACKUP ? [MAIL_TO, MAIL_TO_BACKUP] : [MAIL_TO];
 
-    const mailOptions = {
-        from: `"Parfum App" <${MAIL_USER}>`,
-        to: MAIL_TO,
+    console.log('📨 Tentative envoi email via Resend...');
+    console.log('De =', MAIL_FROM);
+    console.log('Vers =', recipients.map(maskEmail).join(', '));
+    console.log('Sujet =', subject);
+
+    const { data, error } = await resend.emails.send({
+        from: MAIL_FROM,
+        to: recipients,
         replyTo: customer.email,
         subject,
         text: buildOrderText(customer, items, total),
         html: buildOrderHtml(customer, items, total),
-    };
+    });
 
-    console.log('📨 Tentative envoi email...');
-    console.log('De =', maskEmail(MAIL_USER));
-    console.log('Vers =', maskEmail(MAIL_TO));
-    console.log('Sujet =', subject);
+    if (error) {
+        throw new Error(error.message || "Erreur lors de l'envoi avec Resend");
+    }
 
-    const info = await transporter.sendMail(mailOptions);
+    console.log('✅ Email envoyé via Resend');
+    console.log('Email ID =', data?.id);
 
-    console.log('✅ Email envoyé');
-    console.log('MessageId =', info.messageId);
-
-    return info;
+    return data;
 }
 
 // =========================
@@ -502,7 +525,7 @@ app.get('/api/perfumes/image', async (req, res) => {
     }
 });
 
-app.post('/api/order', async (req, res) => {
+app.post('/api/order', orderLimiter, async (req, res) => {
     try {
         const validationError = validateOrderPayload(req.body);
 
@@ -512,21 +535,32 @@ app.post('/api/order', async (req, res) => {
 
         const { customer, items, total } = req.body;
 
-        await sendOrderEmail({ customer, items, total });
+        try {
+            await sendOrderEmail({ customer, items, total });
+        } catch (e) {
+            console.error('❌ Email KO MAIS commande reçue :', e);
+
+            backupOrderToFile({
+                customer,
+                items,
+                total,
+                date: new Date().toISOString(),
+            });
+        }
 
         console.log(
-            `📩 Commande envoyée par email pour ${customer.firstName} ${customer.lastName} - total ${formatPrice(total)}`
+            `📩 Commande traitée pour ${customer.firstName} ${customer.lastName} - total ${formatPrice(total)}`,
         );
 
         return res.status(200).json({
             success: true,
-            message: 'Commande envoyée avec succès.',
+            message: 'Commande reçue avec succès.',
         });
     } catch (error) {
         console.error('❌ Erreur envoi commande :', error);
 
         return res.status(500).json({
-            error: "Impossible d'envoyer la commande.",
+            error: "Impossible de traiter la commande.",
             details: error.message,
         });
     }
@@ -538,5 +572,5 @@ app.post('/api/order', async (req, res) => {
 
 app.listen(PORT, async () => {
     console.log(`🚀 Backend running on http://localhost:${PORT}`);
-    await verifySmtp();
+    await verifyResend();
 });
