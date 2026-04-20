@@ -1,0 +1,21 @@
+const nodemailer = require('nodemailer');
+require('dotenv').config();
+
+async function test() {
+  const transporter = nodemailer.createTransport({
+    host: process.env.MAIL_HOST,
+    port: Number(process.env.MAIL_PORT),
+    secure: String(process.env.MAIL_SECURE).toLowerCase() === 'true',
+    auth: {
+      user: process.env.MAIL_USER,
+      pass: process.env.MAIL_PASS,
+    },
+    logger: true,
+    debug: true,
+  });
+
+  await transporter.verify();
+  console.log('✅ SMTP OK');
+}
+
+test().catch(console.error);

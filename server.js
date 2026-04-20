@@ -7,14 +7,22 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
+import dns from 'node:dns';
 
 dotenv.config();
+
+// ✅ Important : préfère IPv4 pour éviter les soucis IPv6 / EHOSTUNREACH
+dns.setDefaultResultOrder('ipv4first');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
+// =========================
+// ⚙️ CONFIG
+// =========================
+
+const PORT = Number(process.env.PORT || 3000);
 
 // 🔧 Recréer __dirname en ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -43,7 +51,7 @@ function loadCacheFromFile() {
         cache = new Map(Object.entries(parsed));
         console.log(`✅ Cache chargé : ${cache.size} entrée(s)`);
     } catch (error) {
-        console.error('Erreur chargement cache :', error);
+        console.error('❌ Erreur chargement cache :', error);
         cache = new Map();
     }
 }
@@ -53,7 +61,7 @@ function saveCacheToFile() {
         const objectToSave = Object.fromEntries(cache);
         fs.writeFileSync(cacheFilePath, JSON.stringify(objectToSave, null, 2));
     } catch (error) {
-        console.error('Erreur sauvegarde cache :', error);
+        console.error('❌ Erreur sauvegarde cache :', error);
     }
 }
 
@@ -314,36 +322,96 @@ function validateOrderPayload(body) {
 }
 
 // =========================
-// 📩 EMAIL
+// 📧 EMAIL / SMTP
 // =========================
 
+const MAIL_HOST = process.env.MAIL_HOST || 'smtp.gmail.com';
+const MAIL_PORT = Number(process.env.MAIL_PORT || 465);
+const MAIL_SECURE =
+    process.env.MAIL_SECURE !== undefined
+        ? String(process.env.MAIL_SECURE).toLowerCase() === 'true'
+        : MAIL_PORT === 465;
+
+const MAIL_USER = process.env.MAIL_USER;
+const MAIL_PASS = process.env.MAIL_PASS;
+const MAIL_TO = process.env.MAIL_TO || process.env.MAIL_USER;
+
+function maskEmail(email) {
+    if (!email || !email.includes('@')) return 'non défini';
+    const [name, domain] = email.split('@');
+    if (name.length <= 2) return `**@${domain}`;
+    return `${name.slice(0, 2)}***@${domain}`;
+}
+
 const transporter = nodemailer.createTransport({
-    host: process.env.MAIL_HOST,
-    port: Number(process.env.MAIL_PORT || 587),
-    secure: String(process.env.MAIL_SECURE).toLowerCase() === 'true',
+    host: MAIL_HOST,
+    port: MAIL_PORT,
+    secure: MAIL_SECURE,
     auth: {
-        user: process.env.MAIL_USER,
-        pass: process.env.MAIL_PASS,
+        user: MAIL_USER,
+        pass: MAIL_PASS,
     },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 20000,
+    logger: true,
+    debug: true,
 });
 
-async function sendOrderEmail({ customer, items, total }) {
-    const recipient = process.env.MAIL_TO || process.env.MAIL_USER;
+async function verifySmtp() {
+    if (!MAIL_HOST || !MAIL_USER || !MAIL_PASS || !MAIL_TO) {
+        console.error('❌ Configuration email incomplète dans le fichier .env');
+        console.error('MAIL_HOST =', MAIL_HOST || 'non défini');
+        console.error('MAIL_PORT =', MAIL_PORT || 'non défini');
+        console.error('MAIL_SECURE =', MAIL_SECURE);
+        console.error('MAIL_USER =', maskEmail(MAIL_USER));
+        console.error('MAIL_PASS =', MAIL_PASS ? 'défini' : 'non défini');
+        console.error('MAIL_TO =', maskEmail(MAIL_TO));
+        return;
+    }
 
-    if (!process.env.MAIL_HOST || !process.env.MAIL_USER || !process.env.MAIL_PASS || !recipient) {
+    console.log('📧 Vérification SMTP...');
+    console.log('MAIL_HOST =', MAIL_HOST);
+    console.log('MAIL_PORT =', MAIL_PORT);
+    console.log('MAIL_SECURE =', MAIL_SECURE);
+    console.log('MAIL_USER =', maskEmail(MAIL_USER));
+    console.log('MAIL_TO =', maskEmail(MAIL_TO));
+
+    try {
+        await transporter.verify();
+        console.log('✅ SMTP prêt : connexion email OK');
+    } catch (error) {
+        console.error('❌ SMTP erreur de configuration :', error);
+    }
+}
+
+async function sendOrderEmail({ customer, items, total }) {
+    if (!MAIL_HOST || !MAIL_USER || !MAIL_PASS || !MAIL_TO) {
         throw new Error('Configuration email incomplète dans le fichier .env');
     }
 
     const subject = `Nouvelle commande - ${customer.firstName} ${customer.lastName}`;
 
-    await transporter.sendMail({
-        from: `"Parfum App" <${process.env.MAIL_USER}>`,
-        to: recipient,
+    const mailOptions = {
+        from: `"Parfum App" <${MAIL_USER}>`,
+        to: MAIL_TO,
         replyTo: customer.email,
         subject,
         text: buildOrderText(customer, items, total),
         html: buildOrderHtml(customer, items, total),
-    });
+    };
+
+    console.log('📨 Tentative envoi email...');
+    console.log('De =', maskEmail(MAIL_USER));
+    console.log('Vers =', maskEmail(MAIL_TO));
+    console.log('Sujet =', subject);
+
+    const info = await transporter.sendMail(mailOptions);
+
+    console.log('✅ Email envoyé');
+    console.log('MessageId =', info.messageId);
+
+    return info;
 }
 
 // =========================
@@ -447,7 +515,7 @@ app.post('/api/order', async (req, res) => {
         await sendOrderEmail({ customer, items, total });
 
         console.log(
-            `📩 Commande envoyée par email pour ${customer.firstName} ${customer.lastName} - total ${formatPrice(total)}`,
+            `📩 Commande envoyée par email pour ${customer.firstName} ${customer.lastName} - total ${formatPrice(total)}`
         );
 
         return res.status(200).json({
@@ -468,6 +536,7 @@ app.post('/api/order', async (req, res) => {
 // ▶️ START
 // =========================
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log(`🚀 Backend running on http://localhost:${PORT}`);
+    await verifySmtp();
 });
