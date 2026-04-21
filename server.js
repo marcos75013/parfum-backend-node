@@ -40,16 +40,36 @@ const resend = new Resend(RESEND_API_KEY);
 // 🌐 CORS
 // =========================
 
+const allowedOrigins = [
+    'http://localhost:4200',
+    'http://localhost:3000',
+    'https://negociobom.eu',
+    'https://www.negociobom.eu',
+    'https://parfum-front-angular.vercel.app',
+    'https://parfum-front-angular-ccki.vercel.app',
+    'https://parfum-front-angular-fcd6.vercel.app',
+];
+
 app.use(
     cors({
-        origin: [
-            'http://localhost:4200',
-            'http://localhost:3000',
-            'https://negociobom.eu',
-            'https://www.negociobom.eu',
-        ],
+        origin(origin, callback) {
+            // ✅ Autorise les requêtes serveur-à-serveur ou certains outils sans header Origin
+            if (!origin) {
+                return callback(null, true);
+            }
+
+            if (allowedOrigins.includes(origin)) {
+                return callback(null, true);
+            }
+
+            console.log('⛔ Origin refusée par CORS :', origin);
+            return callback(new Error('Not allowed by CORS'));
+        },
+        methods: ['GET', 'POST', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization'],
     }),
 );
+
 
 app.use(express.json());
 
@@ -58,8 +78,8 @@ app.use(express.json());
 // =========================
 
 const orderLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 5, // 5 commandes max par IP sur 15 minutes
+    windowMs: 15 * 60 * 1000,
+    max: 5,
     message: {
         error: 'Trop de tentatives. Réessaie plus tard.',
     },
@@ -382,6 +402,11 @@ function validateOrderPayload(body) {
     return null;
 }
 
+function forceHttps(url) {
+    if (!url) return url;
+    return url.replace(/^http:\/\//i, 'https://');
+}
+
 // =========================
 // 📧 EMAIL / RESEND
 // =========================
@@ -452,7 +477,7 @@ app.get('/api/perfumes/image', async (req, res) => {
 
     if (cache.has(key)) {
         console.log('🟢 Cache HIT :', key);
-        return res.json({ imageUrl: cache.get(key) });
+        return res.json({ imageUrl: forceHttps(cache.get(key)) });
     }
 
     try {
@@ -507,6 +532,8 @@ app.get('/api/perfumes/image', async (req, res) => {
             imageUrl = `https://picsum.photos/seed/${encodeURIComponent(name)}/600/600`;
         }
 
+        imageUrl = forceHttps(imageUrl);
+
         cache.set(key, imageUrl);
         saveCacheToFile();
 
@@ -560,7 +587,7 @@ app.post('/api/order', orderLimiter, async (req, res) => {
         console.error('❌ Erreur envoi commande :', error);
 
         return res.status(500).json({
-            error: "Impossible de traiter la commande.",
+            error: 'Impossible de traiter la commande.',
             details: error.message,
         });
     }
@@ -571,6 +598,6 @@ app.post('/api/order', orderLimiter, async (req, res) => {
 // =========================
 
 app.listen(PORT, async () => {
-    console.log(`🚀 Backend running on http://localhost:${PORT}`);
+    console.log(`🚀 Backend running on port ${PORT}`);
     await verifyResend();
 });
