@@ -271,7 +271,7 @@ function maskEmail(email) {
     return `${name.slice(0, 2)}***@${domain}`;
 }
 
-function buildOrderHtml(customer, items, total) {
+function buildOrderHtml(customer, items, total, deliveryPreferences) {
     const rows = items
         .map((item) => {
             const parfum = item.parfum || {};
@@ -292,6 +292,21 @@ function buildOrderHtml(customer, items, total) {
         })
         .join('');
 
+    const deliveryBlock = deliveryPreferences?.enabled
+        ? `
+      <div style="margin:24px 0;padding:16px;border:1px solid #e5e7eb;border-radius:12px;background:#f0fdf4;">
+        <h3 style="margin-top:0;">Préférences de livraison</h3>
+        <p><strong>Adresse :</strong><br>${escapeHtml(deliveryPreferences.address || '').replaceAll('\n', '<br>')}</p>
+        <p><strong>Créneau 1 :</strong> ${escapeHtml(deliveryPreferences.deliverySlot1 || '')}</p>
+        <p><strong>Créneau 2 :</strong> ${escapeHtml(deliveryPreferences.deliverySlot2 || '')}</p>
+      </div>
+    `
+        : `
+      <div style="margin:24px 0;padding:16px;border:1px solid #e5e7eb;border-radius:12px;background:#f9fafb;">
+        <p style="margin:0;"><strong>Préférences de livraison :</strong> non renseignées</p>
+      </div>
+    `;
+
     return `
     <div style="font-family:Arial,sans-serif;color:#111827;line-height:1.5;">
       <h2 style="margin-bottom:8px;">Nouvelle commande parfum</h2>
@@ -303,8 +318,9 @@ function buildOrderHtml(customer, items, total) {
         <p><strong>Nom :</strong> ${escapeHtml(customer.lastName)}</p>
         <p><strong>Email :</strong> ${escapeHtml(customer.email)}</p>
         <p><strong>Téléphone :</strong> ${escapeHtml(customer.phone)}</p>
-        <p><strong>Adresse :</strong><br>${escapeHtml(customer.address).replaceAll('\n', '<br>')}</p>
       </div>
+
+      ${deliveryBlock}
 
       <div style="margin:24px 0;">
         <h3>Produits commandés</h3>
@@ -334,7 +350,7 @@ function buildOrderHtml(customer, items, total) {
   `;
 }
 
-function buildOrderText(customer, items, total) {
+function buildOrderText(customer, items, total, deliveryPreferences) {
     const lines = items.map((item) => {
         const parfum = item.parfum || {};
         const quantity = Number(item.quantity || 0);
@@ -350,6 +366,15 @@ function buildOrderText(customer, items, total) {
         ].join('\n');
     });
 
+    const deliveryText = deliveryPreferences?.enabled
+        ? [
+            'Préférences de livraison',
+            `Adresse : ${deliveryPreferences.address || ''}`,
+            `Créneau 1 : ${deliveryPreferences.deliverySlot1 || ''}`,
+            `Créneau 2 : ${deliveryPreferences.deliverySlot2 || ''}`,
+        ].join('\n')
+        : 'Préférences de livraison : non renseignées';
+
     return `
 Nouvelle commande parfum
 
@@ -358,7 +383,8 @@ Prénom : ${customer.firstName}
 Nom : ${customer.lastName}
 Email : ${customer.email}
 Téléphone : ${customer.phone}
-Adresse : ${customer.address}
+
+${deliveryText}
 
 Produits
 ${lines.join('\n\n')}
@@ -371,6 +397,7 @@ function validateOrderPayload(body) {
     const customer = body?.customer;
     const items = body?.items;
     const total = body?.total;
+    const deliveryPreferences = body?.deliveryPreferences;
 
     if (body?.website) {
         return 'Requête invalide.';
@@ -380,7 +407,7 @@ function validateOrderPayload(body) {
         return 'Informations client manquantes.';
     }
 
-    const requiredFields = ['firstName', 'lastName', 'email', 'phone', 'address'];
+    const requiredFields = ['firstName', 'lastName', 'email', 'phone'];
     for (const field of requiredFields) {
         if (!customer[field] || !String(customer[field]).trim()) {
             return `Champ client manquant : ${field}`;
@@ -389,6 +416,20 @@ function validateOrderPayload(body) {
 
     if (!isValidEmail(customer.email)) {
         return 'Adresse email invalide.';
+    }
+
+    if (deliveryPreferences?.enabled) {
+        if (!deliveryPreferences.address || !String(deliveryPreferences.address).trim()) {
+            return 'Adresse de livraison manquante.';
+        }
+
+        if (!deliveryPreferences.deliverySlot1 || !deliveryPreferences.deliverySlot2) {
+            return 'Créneaux de livraison manquants.';
+        }
+
+        if (deliveryPreferences.deliverySlot1 === deliveryPreferences.deliverySlot2) {
+            return 'Les créneaux doivent être différents.';
+        }
     }
 
     if (!Array.isArray(items) || items.length === 0) {
@@ -430,7 +471,9 @@ async function verifyResend() {
     }
 }
 
-async function sendOrderEmail({ customer, items, total }) {
+async function sendOrderEmail(order) {
+    const { customer, items, total, deliveryPreferences } = order;
+
     if (!RESEND_API_KEY || !MAIL_TO || !MAIL_FROM) {
         throw new Error('Configuration Resend incomplète dans le fichier .env');
     }
@@ -442,14 +485,15 @@ async function sendOrderEmail({ customer, items, total }) {
     console.log('De =', MAIL_FROM);
     console.log('Vers =', recipients.map(maskEmail).join(', '));
     console.log('Sujet =', subject);
+    console.log('Delivery preferences =', deliveryPreferences);
 
     const { data, error } = await resend.emails.send({
         from: MAIL_FROM,
         to: recipients,
         replyTo: customer.email,
         subject,
-        text: buildOrderText(customer, items, total),
-        html: buildOrderHtml(customer, items, total),
+        text: buildOrderText(customer, items, total, deliveryPreferences),
+        html: buildOrderHtml(customer, items, total, deliveryPreferences),
     });
 
     if (error) {
@@ -461,7 +505,6 @@ async function sendOrderEmail({ customer, items, total }) {
 
     return data;
 }
-
 // =========================
 // 🚀 ROUTES
 // =========================
@@ -554,16 +597,23 @@ app.get('/api/perfumes/image', async (req, res) => {
 
 app.post('/api/order', orderLimiter, async (req, res) => {
     try {
+        console.log('📦 Body reçu /api/order =', JSON.stringify(req.body, null, 2));
+
         const validationError = validateOrderPayload(req.body);
 
         if (validationError) {
             return res.status(400).json({ error: validationError });
         }
 
-        const { customer, items, total } = req.body;
+        const { customer, items, total, deliveryPreferences } = req.body;
 
         try {
-            await sendOrderEmail({ customer, items, total });
+            await sendOrderEmail({
+                customer,
+                items,
+                total,
+                deliveryPreferences,
+            });
         } catch (e) {
             console.error('❌ Email KO MAIS commande reçue :', e);
 
@@ -571,6 +621,7 @@ app.post('/api/order', orderLimiter, async (req, res) => {
                 customer,
                 items,
                 total,
+                deliveryPreferences,
                 date: new Date().toISOString(),
             });
         }
@@ -592,7 +643,6 @@ app.post('/api/order', orderLimiter, async (req, res) => {
         });
     }
 });
-
 // =========================
 // ▶️ START
 // =========================
