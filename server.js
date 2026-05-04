@@ -38,34 +38,15 @@ let cache = new Map();
 const resend = new Resend(RESEND_API_KEY);
 
 // =========================
-// 🌐 CORS
+// 🌐 CORS (FIX TOTAL)
 // =========================
-
-const allowedOrigins = [
-    'http://localhost:4200',
-    'http://localhost:3000',
-
-    // FRONT ESCALA OLFACTIVE
-    'https://escale-olfactive.vercel.app',
-    'https://escaleolfactive.fr',
-    'https://www.escaleolfactive.fr',
-];
 
 app.use(
     cors({
-        origin(origin, callback) {
-            if (!origin) return callback(null, true);
-
-            if (allowedOrigins.includes(origin)) {
-                return callback(null, true);
-            }
-
-            console.log('⛔ Origin refusée :', origin);
-            return callback(new Error('Not allowed by CORS'));
-        },
+        origin: true, // 🔥 autorise tout (évite blocage Vercel)
         methods: ['GET', 'POST', 'OPTIONS'],
         allowedHeaders: ['Content-Type', 'Authorization'],
-    }),
+    })
 );
 
 app.use(express.json());
@@ -93,7 +74,7 @@ function loadCacheFromFile() {
         cache = new Map(Object.entries(parsed));
 
         console.log(`✅ Cache chargé : ${cache.size}`);
-    } catch (e) {
+    } catch {
         cache = new Map();
     }
 }
@@ -101,14 +82,14 @@ function loadCacheFromFile() {
 function saveCacheToFile() {
     fs.writeFileSync(
         cacheFilePath,
-        JSON.stringify(Object.fromEntries(cache), null, 2),
+        JSON.stringify(Object.fromEntries(cache), null, 2)
     );
 }
 
 function backupOrder(order) {
     fs.appendFileSync(
         ordersBackupFilePath,
-        JSON.stringify(order) + '\n',
+        JSON.stringify(order) + '\n'
     );
 }
 
@@ -128,6 +109,18 @@ function isValidEmail(email) {
 
 function forceHttps(url) {
     return url?.replace('http://', 'https://');
+}
+
+// 🔥 nettoyage intelligent des noms
+function cleanName(str = '') {
+    return str
+        .replace(/\+/g, ' ')
+        .replace(/\d+\s?ml/gi, '')
+        .replace(/miniature/gi, '')
+        .replace(/coffret/gi, '')
+        .replace(/eau de parfum|edp|edt/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
 // =========================
@@ -153,8 +146,8 @@ async function sendOrderEmail(order) {
         .map(
             (i) =>
                 `<p>${i.parfum.name} x${i.quantity} = ${formatPrice(
-                    i.parfum.price * i.quantity,
-                )}</p>`,
+                    i.parfum.price * i.quantity
+                )}</p>`
         )
         .join('')}
 
@@ -181,18 +174,25 @@ app.get('/api/perfumes/image', async (req, res) => {
 
     if (!name) return res.status(400).json({ error: 'Missing name' });
 
-    const key = `${brand}_${name}`;
+    const clean = cleanName(name);
+    const key = `${brand}_${clean}`;
 
     if (cache.has(key)) {
         return res.json({ imageUrl: cache.get(key) });
     }
 
     try {
-        const query = `${brand} ${name} perfume bottle`;
+        const query = `${brand || ''} ${clean} perfume bottle`;
+
+        console.log('🔎 Recherche image:', query);
 
         const url = `https://www.bing.com/images/search?q=${encodeURIComponent(query)}`;
 
-        const { data } = await axios.get(url);
+        const { data } = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0',
+            },
+        });
 
         const $ = cheerio.load(data);
         const results = [];
@@ -200,12 +200,19 @@ app.get('/api/perfumes/image', async (req, res) => {
         $('.iusc').each((_, el) => {
             const m = $(el).attr('m');
             if (m) {
-                const meta = JSON.parse(m);
-                if (meta.murl) results.push(meta.murl);
+                try {
+                    const meta = JSON.parse(m);
+                    if (meta.murl) results.push(meta.murl);
+                } catch {}
             }
         });
 
-        let image = results[0] || `https://picsum.photos/600`;
+        let image = results[0];
+
+        if (!image) {
+            console.log('⚠️ Aucune image trouvée, fallback');
+            image = `https://picsum.photos/600?random=${Math.random()}`;
+        }
 
         image = forceHttps(image);
 
@@ -213,9 +220,11 @@ app.get('/api/perfumes/image', async (req, res) => {
         saveCacheToFile();
 
         res.json({ imageUrl: image });
-    } catch {
+    } catch (e) {
+        console.error('❌ Erreur image:', e.message);
+
         res.json({
-            imageUrl: `https://picsum.photos/600`,
+            imageUrl: `https://picsum.photos/600?random=${Math.random()}`,
         });
     }
 });
