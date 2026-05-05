@@ -212,32 +212,84 @@ function scoreImageUrl(url = '', brand = '', name = '') {
 // 📧 EMAIL
 // =========================
 
+function escapeHtml(value = '') {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+function formatDeliverySlot(slot = '') {
+    if (!slot) return 'Non renseigné';
+
+    const [date, time] = String(slot).split(' ');
+
+    if (!date || !time) {
+        return escapeHtml(slot);
+    }
+
+    const [year, month, day] = date.split('-');
+
+    if (!year || !month || !day) {
+        return escapeHtml(slot);
+    }
+
+    return `${day}/${month}/${year} à ${time}`;
+}
+
+function buildDeliveryPreferencesHtml(deliveryPreferences) {
+    if (!deliveryPreferences?.enabled) {
+        return `
+            <h3>Préférences de livraison :</h3>
+            <p>Non renseignées par le client.</p>
+        `;
+    }
+
+    const address = escapeHtml(deliveryPreferences.address || 'Non renseignée')
+        .replace(/\n/g, '<br>');
+
+    const deliverySlot1 = formatDeliverySlot(deliveryPreferences.deliverySlot1);
+    const deliverySlot2 = formatDeliverySlot(deliveryPreferences.deliverySlot2);
+
+    return `
+        <h3>Préférences de livraison :</h3>
+
+        <p><b>Adresse souhaitée :</b><br>${address}</p>
+        <p><b>Créneau souhaité 1 :</b> ${deliverySlot1}</p>
+        <p><b>Créneau souhaité 2 :</b> ${deliverySlot2}</p>
+    `;
+}
+
 async function sendOrderEmail(order) {
-    const { customer, items, total } = order;
+    const { customer, items, total, deliveryPreferences } = order;
 
     const subject = `Commande ${APP_NAME} - ${customer.firstName} ${customer.lastName}`;
 
     const recipients = MAIL_TO_BACKUP ? [MAIL_TO, MAIL_TO_BACKUP] : [MAIL_TO];
 
     const html = `
-    <h2>Nouvelle commande ${APP_NAME}</h2>
+        <h2>Nouvelle commande ${APP_NAME}</h2>
 
-    <p><b>Client :</b> ${customer.firstName} ${customer.lastName}</p>
-    <p><b>Email :</b> ${customer.email}</p>
-    <p><b>Téléphone :</b> ${customer.phone || 'Non renseigné'}</p>
+        <p><b>Client :</b> ${escapeHtml(customer.firstName)} ${escapeHtml(customer.lastName)}</p>
+        <p><b>Email :</b> ${escapeHtml(customer.email)}</p>
+        <p><b>Téléphone :</b> ${escapeHtml(customer.phone || 'Non renseigné')}</p>
 
-    <h3>Produits :</h3>
-    ${items
+        ${buildDeliveryPreferencesHtml(deliveryPreferences)}
+
+        <h3>Produits :</h3>
+        ${items
         .map(
             (i) =>
-                `<p>${i.parfum.name} x${i.quantity} = ${formatPrice(
+                `<p>${escapeHtml(i.parfum.name)} x${i.quantity} = ${formatPrice(
                     i.parfum.price * i.quantity
                 )}</p>`
         )
         .join('')}
 
-    <h2>Total : ${formatPrice(total)}</h2>
-  `;
+        <h2>Total : ${formatPrice(total)}</h2>
+    `;
 
     const { error } = await resend.emails.send({
         from: MAIL_FROM,
